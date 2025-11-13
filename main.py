@@ -73,12 +73,16 @@ def get_mysql_connection():
         )
         return conn
     except MySQLError as e:
+        # Bubble up; callers may catch to degrade gracefully
         raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
 
 
 def load_db_schema() -> Dict[str, List[str]]:
     """Read information_schema to get all tables and columns for anti-hallucination validation."""
-    conn = get_mysql_connection()
+    try:
+        conn = get_mysql_connection()
+    except HTTPException:
+        return {}
     schema: Dict[str, List[str]] = {}
     try:
         cur = conn.cursor()
@@ -307,7 +311,10 @@ def validate_and_build_sql(spec: Dict[str, Any], schema: Dict[str, List[str]]) -
 # ------------------------------
 
 def execute_query(sql: str, params: List[Any]) -> List[Dict[str, Any]]:
-    conn = get_mysql_connection()
+    try:
+        conn = get_mysql_connection()
+    except HTTPException as e:
+        raise HTTPException(status_code=500, detail="Database non raggiungibile. Configura MYSQL_* e riprova.")
     try:
         cur = conn.cursor(dictionary=True)
         cur.execute(sql, params)
@@ -412,6 +419,8 @@ def root():
 @app.get("/test")
 def test():
     schema = get_valid_schema()
+    if not schema:
+        return {"backend": "ok", "db": MYSQL_DB, "warning": "database non raggiungibile o vuoto"}
     return {"backend": "ok", "tables": list(schema.keys())[:20]}
 
 
@@ -462,6 +471,12 @@ async def chatbot_message(req: Request):
 
     # Get schema and call AI for JSON spec
     schema = get_valid_schema()
+    if not schema:
+        return JSONResponse({
+            "type": "text",
+            "message": "Database non configurato o non raggiungibile. Imposta le variabili MYSQL_* e riprova.",
+        })
+
     ai_spec = ai_client.ask(user_message, schema)
 
     if ai_spec.get("intent") == "invalid":
